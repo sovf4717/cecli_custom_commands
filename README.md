@@ -18,19 +18,16 @@ Commands provided:
 
 ## How it works
 
-codececli
-
 Cecli loads custom commands from the paths listed under the `custom:` key in
 its YAML config. Each `.py` file found there is imported and any class named
 `CustomCommand` (inheriting `cecli.commands.utils.base_command.BaseCommand`)
 is registered automatically. These commands follow that exact convention:
 
-codepython
+```python
 NORM_NAME = "rag-add"   # registered name
 DESCRIPTION = "Add files/folders as RAG objects for the current conversation only"
 show_completion_notification = True
-
-code
+```
 
 Two important properties:
 
@@ -46,10 +43,10 @@ installing anything.
 
 ## 1. Install
 
-codebash
+```bash
 git clone https://github.com/sovf4717/cecli_custom_commands
 # or download the folder and place the .py files anywhere on disk
-code
+```
 
 The four command files (`rag_add.py`, `rag_drop.py`, `rag_ls.py`,
 `rag_question.py`) plus the shared `rag_utils.py` must all sit in the **same
@@ -63,11 +60,11 @@ runtime.
 Add the directory to your cecli config (`.cecli.conf.yml` in your project, or
 `~/.cecli.conf.yml` globally):
 
-codeyaml
+```yaml
 custom:
   command-paths:
     - "E:/cecli_custom_commands"
-code
+```
 
 For a directory, cecli scans every `.py` file for `CustomCommand` classes and
 registers them. (You can also list individual files instead of the whole
@@ -81,10 +78,10 @@ Restart cecli. The new commands now appear in tab completion and `/help`.
 
 ### 3.1 Add context — `/rag-add`
 
-codebash
+```bash
 /rag-add ./src                      # index a whole directory
 /rag-add notes.md docs/             # mix files and folders
-code
+```
 
 * **No arguments** (`/rag-add` alone) opens cecli's fuzzy finder so you can
 select files interactively.
@@ -98,51 +95,51 @@ cecli's argument parser splits on unquoted whitespace, so any path containing a
 space **must be wrapped in quotes**, otherwise it gets split into separate
 tokens (the most common cause of "wrong file got indexed" bugs).
 
-codebash
+```bash
 /rag-add "C:\Users\me\Obsidian Vault\notes.md"   # correct
 /rag-add  C:\Users\me\Obsidian Vault\notes.md    # wrong — becomes two paths
-code
+```
 
 If a path with spaces is not quoted, `/rag-add` will warn you with a hint to
 add quotes.
 
 ### 3.3 Ask a question — `/rag-question`
 
-codebash
+```bash
 /rag-question  how does the auth middleware handle token expiry?
-code
+```
 
 The command retrieves the most relevant chunks (by keyword overlap, top-8 by
 default) and feeds them to the model together with your question. It works
 with both English and Chinese content (the tokenizer handles CJK character +
 bigram tokens), so for example:
 
-codebash
+```bash
 /rag-question  我该如何自学
-code
+```
 
 ### 3.4 List — `/rag-ls`
 
-codebash
+```bash
 /rag-ls
-code
+```
 
 Output:
 
-codes
+```
 RAG files in the current conversation (3 files, 12 chunks):
   E:/project/notes.md
   E:/project/docs/api.md
   E:/project/docs/faq.md
-code
+```
 
 ### 3.5 Drop — `/rag-drop`
 
-codebash
+```bash
 /rag-drop                # drop everything
 /rag-drop notes.md       # drop one specific object
 /rag-drop *.md           # drop all markdown objects
-code
+```
 
 ---
 
@@ -173,7 +170,7 @@ per question.
 
 ## 6. Repository layout
 
-code
+```
 cecli_custom_commands/
 ├── rag_add.py        # /rag-add
 ├── rag_drop.py       # /rag-drop
@@ -181,7 +178,7 @@ cecli_custom_commands/
 ├── rag_question.py   # /rag-question
 ├── rag_utils.py      # shared store + index/retrieval helpers
 └── .gitignore
-code
+```
 
 ---
 
