@@ -34,17 +34,6 @@ def _load_rag_utils():
         return module
 
 
-def _get_rag_state(coder):
-    """Return (files, index) for the coder's session-scoped RAG store."""
-    files = getattr(coder, "rag_files", None)
-    if files is None:
-        files = set()
-        coder.rag_files = files
-    index = getattr(coder, "rag_index", None)
-    if index is None:
-        index = {"entries": [], "files": []}
-        coder.rag_index = index
-    return files, index
 
 
 class CustomCommand(BaseCommand):
@@ -58,9 +47,8 @@ class CustomCommand(BaseCommand):
         _ru = _load_rag_utils()
         build_rag_index = _ru.build_rag_index
         collect_target_files = _ru.collect_target_files
-
+        session_rag_add = _ru.session_rag_add
         root = coder.root
-        files, index = _get_rag_state(coder)
 
         selected = await cls._select_targets(io, coder, args)
         if not selected:
@@ -86,20 +74,11 @@ class CustomCommand(BaseCommand):
                 io, "rag-add", "No indexable files found in selection"
             )
 
-        for f in concrete_files:
-            files.add(str(f))
-
-        # Rebuild the in-memory keyword index over the newly added files, then
-        # merge it into the session index so previously added files remain.
+        # Build the keyword index over the newly collected files, then merge
+        # into the module-level session store so the state survives coder switches
+        # (e.g. the child coder spawned by /rag-question).
         new_index_data = build_rag_index(concrete_files)
-        seen_ids = {e["id"] for e in index["entries"]}
-        for entry in new_index_data["entries"]:
-            if entry["id"] not in seen_ids:
-                index["entries"].append(entry)
-                seen_ids.add(entry["id"])
-        for fpath in new_index_data["files"]:
-            if fpath not in index["files"]:
-                index["files"].append(fpath)
+        _ru.session_rag_add(concrete_files, new_index_data)
 
         io.tool_output(
             f"Added {len(concrete_files)} files ({len(new_index_data['entries'])} chunks) to the RAG store."

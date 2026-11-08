@@ -4,6 +4,8 @@ Provides:
 - collect_target_files(paths, root): expand directories/globs into concrete files
 - build_rag_index(file_paths): build a lightweight keyword index (in-memory)
 - rag_context_block(index, question, top_k): retrieve relevant chunks
+- Module-level session store so RAG state survives coder switches (like the
+  /rag-question child-coder created by SwitchCoderSignal).
 
 All functions are pure / have no external dependencies beyond the stdlib.
 """
@@ -41,14 +43,11 @@ def _quote_path_token(p):
 def split_args_with_spaces(args):
     """Split command arguments on unquoted whitespace, preserving quoted spans.
 
-    This is a helper so command files can parse things like:
-    /rag-add "C:\\Users\\me\\my folder\\notes.md"  extra.txt
-    without breaking on spaces. The returned tokens keep their surrounding
-    quote characters stripped.
+    The returned tokens have their surrounding quote characters stripped.
     """
     out = []
-    cur: List[str] = []
-    in_q: str = ""
+    cur = []
+    in_q = ""
     for ch in args:
         if ch in ('"', "'"):
             if not in_q:
@@ -69,15 +68,13 @@ def split_args_with_spaces(args):
 def collect_target_files(paths, root):
     """Expand a list of paths (files, dirs, globs) into concrete, indexable files.
 
-    Accepts either:
-    - a flat list of path strings / Path objects
-    - strings where spaces are wrapped in quotes (we split them with
-      split_args_with_spaces before resolving).
+    Accepts a flat list of path strings / Path objects. Strings that contain
+    embedded quoted-spaces (from cecli command-arg parsing) are re-split via
+    split_args_with_spaces so "C:\\...\\my folder\\notes.md" is treated as one path.
     """
     result = []
     seen = set()
     root = Path(root)
-    # Accept plain text where quoted paths were embedded; re-split if needed.
     flat: List[str] = []
     for p in paths:
         p_str = str(p)
@@ -119,13 +116,114 @@ def _should_index(path: Path) -> bool:
     return path.suffix in _TEXT_EXTS or path.suffix == ""
 
 
+# ---------------------------------------------------------------------------
+# Module-level session store.
+#
+# RAG state is now module-scoped rather than attached to the live Coder
+# instance, so it survives the SwitchCoderSignal done by /rag-question.
+# ---------------------------------------------------------------------------
+_SESSION_RAG = {
+    "files": set(),       # set of str paths currently in the RAG set
+    "entries": [],        # list of chunk dicts {id, file, start, text}
+    "files_list": [],     # de-duplicated str file list (parallel to entries' files)
+}
+
+
+def get_session_rag():
+    """Return the module-scoped RAG store dict (single shared instance)."""
+    return _SESSION_RAG
+
+
+def session_rag_add(files, new_index_data):
+    """Merge a freshly-built index into the session store.
+
+    - files: iterable of Path/str files that were just collected
+    - new_index_data: dict returned by build_rag_index({'entries':..., 'files':...})
+    Returns (added_file_count, added_chunk_count).
+    """
+    added_files = 0
+    for f in files:
+        fstr = str(f)
+        if fstr not in _SESSION_RAG["files"]:
+            _SESSION_RAG["files"].add(fstr)
+            added_files += 1
+    seen_ids = {e["id"] for e in _SESSION_RAG["entries"]}
+    added_chunks = 0
+    for entry in new_index_data["entries"]:
+        if entry["id"] not in seen_ids:
+            _SESSION_RAG["entries"].append(entry)
+            seen_ids.add(entry["id"])
+            added_chunks += 1
+    for fpath in new_index_data["files"]:
+        if fpath not in _SESSION_RAG["files_list"]:
+            _SESSION_RAG["files_list"].append(fpath)
+    return added_files, added_chunks
+
+
+def session_rag_drop_all():
+    """Remove every RAG object from the session store."""
+    removed = len(_SESSION_RAG["files"])
+    _SESSION_RAG["files"].clear()
+    _SESSION_RAG["entries"] = []
+    _SESSION_RAG["files_list"] = []
+    return removed
+
+
+def session_rag_drop_matching(patterns, root):
+    """Drop session RAG entries matching the given pattern strings.
+
+    - patterns: list of raw tokens (filenames, globs, or full paths)
+    - root: project root used to resolve relative patterns
+    Returns (dropped_count, dropped_paths).
+    """
+    dropped = []
+    for word in patterns:
+        expanded = os.path.expanduser(word)
+        is_glob = any(c in expanded for c in "*?[")
+        for fpath in list(_SESSION_RAG["files"]):
+            if is_glob:
+                if fnmatch.fnmatch(fpath, expanded) or fnmatch.fnmatch(os.path.basename(fpath), expanded):
+                    _SESSION_RAG["files"].discard(fpath)
+                    dropped.append(fpath)
+            else:
+                p = Path(expanded)
+                if not p.is_absolute():
+                    p = Path(root) / p
+                if str(p) == fpath or expanded in fpath:
+                    _SESSION_RAG["files"].discard(fpath)
+                    dropped.append(fpath)
+    # Rebuild index entries from the surviving file list so it stays consistent.
+    if dropped:
+        _SESSION_RAG["entries"] = []
+        _SESSION_RAG["files_list"] = []
+        remaining = [Path(f) for f in _SESSION_RAG["files"]]
+        if remaining:
+            new_data = build_rag_index(remaining)
+            _SESSION_RAG["entries"] = new_data["entries"]
+            _SESSION_RAG["files_list"] = new_data["files"]
+    return len(dropped), dropped
+
+
+def session_rag_list():
+    """Return (file_count, chunk_count, files)."""
+    return len(_SESSION_RAG["files"]), len(_SESSION_RAG["entries"]), sorted(_SESSION_RAG["files"])
+
+
+def session_rag_index():
+    """Return the index dict shaped like build_rag_index output (for rag_context_block)."""
+    return {"entries": _SESSION_RAG["entries"], "files": _SESSION_RAG["files_list"]}
+
+
+# ---------------------------------------------------------------------------
+# Tokenizer + chunking + retrieval.
+# ---------------------------------------------------------------------------
 _CHUNK_CHARS = 1500
 
 _STOPWORDS = frozenset(
     "a an and are as at be but by for from has have in is it of on or that the this to was were will would i you he she they we me him her them us my your his her their our its so if then than when which who what where why how all any both each few more most other some such only own same too can could should do does did done been being will shall may might must not no nor".split()
 )
 
-_CJK_STOPWORDS = frozenset("的 了 在 是 我 有 和 就 也 都 而 及 以 于 这 那 你 他 她 它 吗 呢 吧 啊 哦 嗯 与 并 或 对 从 向 被 把 给 让 为 所 之 其 此 彼".split())
+_CJK_STOPWORDS = frozenset("\u7684 \u4e86 \u5728 \u662f \u6211 \u6709 \u548c \u5c31 \u4e5f \u90fd \u800c \u53ca \u4ee5 \u4e8e \u8fd9 \u90a3 \u4f60 \u4ed6 \u5979 \u5b83 \u5417 \u5462 \u5427 \u554a \u54e6 \u55ef \u4e0e \u5e76 \u6216 \u5bf9 \u4ece \u5411 \u88ab \u628a \u7ed9 \u8ba9 \u4e3a \u6240 \u4e4b \u5176 \u6b64 \u5f7c".split())
 
 
 def _tokenize(text: str):
@@ -161,8 +259,8 @@ def build_rag_index(file_paths):
     for fpath in file_paths:
         fpath_str = str(fpath)
         try:
-            content = fpath.read_text(encoding="utf-8", errors="replace")
-        except (OSError, TypeError):
+            content = Path(fpath).read_text(encoding="utf-8", errors="replace")
+        except (OSError, TypeError, FileNotFoundError):
             continue
         if fpath_str not in files_list:
             files_list.append(fpath_str)

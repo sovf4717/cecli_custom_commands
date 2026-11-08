@@ -38,14 +38,19 @@ class CustomCommand(BaseCommand):
         """Retrieve from the session RAG store and answer, like /help."""
         _ru = _load_rag_utils()
         rag_context_block = _ru.rag_context_block
+        _ru = _load_rag_utils()
+        rag_context_block = _ru.rag_context_block
 
         question = (args or "").strip()
         if not question:
             io.tool_output("Usage: /rag-question <your question>")
             return format_command_result(io, "rag-question", "Missing question")
 
-        index = getattr(coder, "rag_index", None)
-        if not index or not index.get("entries"):
+        # Use the module-level session store so RAG state is the same as the one
+        # /rag-add wrote into, even after the coder switch caused by
+        # SwitchCoderSignal below.
+        index = _ru.session_rag_index()
+        if not index.get("entries"):
             io.tool_output(
                 "No RAG objects in this conversation yet. "
                 "Run /rag-add first to register files/folders."
