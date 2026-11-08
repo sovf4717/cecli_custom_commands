@@ -1,1 +1,3 @@
 .cecli*
+__pycache__/
+*.pyc
