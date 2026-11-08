@@ -1,41 +1,31 @@
 """Custom command: /rag-question"""
 
-import importlib.util as _ilu
 import os
+import sys
 from pathlib import Path
 from typing import List
 
 from cecli.commands.utils.base_command import BaseCommand
 from cecli.commands.utils.helpers import (
     format_command_result,
-    get_file_completions,
-    parse_quoted_filenames,
 )
-from cecli.utils import run_fzf
 
 
 def _load_rag_utils():
     """Load rag_utils.py from the same directory as this file."""
-    import sys
-    from pathlib import Path as _Path
-    dir_name = _Path(__file__).parent
-    if str(dir_name) not in sys.path:
-        sys.path.insert(0, str(dir_name))
-    import rag_utils as _ru
-    return _ru
-
-
-def _get_rag_state(coder):
-    """Return (files, index) for the coder's session-scoped RAG store."""
-    files = getattr(coder, "rag_files", None)
-    if files is None:
-        files = set()
-        coder.rag_files = files
-    index = getattr(coder, "rag_index", None)
-    if index is None:
-        index = {"entries": [], "files": []}
-        coder.rag_index = index
-    return files, index
+    dir_name = str(Path(__file__).parent)
+    if dir_name not in sys.path:
+        sys.path.insert(0, dir_name)
+    try:
+        import rag_utils as _ru
+        return _ru
+    except ImportError:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location("_rag_utils", Path(__file__).parent / "rag_utils.py")
+        module = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules["rag_utils"] = module
+        return module
 
 
 class CustomCommand(BaseCommand):
@@ -52,7 +42,7 @@ class CustomCommand(BaseCommand):
         question = (args or "").strip()
         if not question:
             io.tool_output("Usage: /rag-question <your question>")
-            return format_command_result(io, "rag-question", "Missing question", error=None)
+            return format_command_result(io, "rag-question", "Missing question")
 
         index = getattr(coder, "rag_index", None)
         if not index or not index.get("entries"):
@@ -61,7 +51,7 @@ class CustomCommand(BaseCommand):
                 "Run /rag-add first to register files/folders."
             )
             return format_command_result(
-                io, "rag-question", "No RAG objects available", error=None
+                io, "rag-question", "No RAG objects available"
             )
 
         import traceback
@@ -93,9 +83,11 @@ class CustomCommand(BaseCommand):
             create_kwargs["num_cache_warming_pings"] = 0
 
             rag_coder = await Coder.create(**create_kwargs)
-            user_msg = rag_context_block(index, question)
-            if not user_msg.strip():
-                user_msg = f"# Question: {question}\n\n# No RAG context was retrieved.\n"
+            context = rag_context_block(index, question)
+            if context.strip():
+                user_msg = context
+            else:
+                user_msg = "# RAG Context (retrieved chunks)\n\n# No RAG context was retrieved.\n"
             user_msg += f"\n\n# Question: {question}\n"
             user_msg += (
                 "\nAnswer the above question using only the RAG context provided above.\n"

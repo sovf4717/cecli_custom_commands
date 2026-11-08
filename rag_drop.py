@@ -1,28 +1,32 @@
 """Custom command: /rag-drop"""
 
-import importlib.util as _ilu
 import os
+import sys
 from pathlib import Path
 from typing import List
 
 from cecli.commands.utils.base_command import BaseCommand
 from cecli.commands.utils.helpers import (
     format_command_result,
-    get_file_completions,
     parse_quoted_filenames,
 )
-from cecli.utils import run_fzf
 
 
 def _load_rag_utils():
     """Load rag_utils.py from the same directory as this file."""
-    import sys
-    from pathlib import Path as _Path
-    dir_name = _Path(__file__).parent
-    if str(dir_name) not in sys.path:
-        sys.path.insert(0, str(dir_name))
-    import rag_utils as _ru
-    return _ru
+    dir_name = str(Path(__file__).parent)
+    if dir_name not in sys.path:
+        sys.path.insert(0, dir_name)
+    try:
+        import rag_utils as _ru
+        return _ru
+    except ImportError:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location("_rag_utils", Path(__file__).parent / "rag_utils.py")
+        module = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules["rag_utils"] = module
+        return module
 
 
 def _get_rag_state(coder):
@@ -50,7 +54,7 @@ class CustomCommand(BaseCommand):
 
         if not files and not index.get("entries"):
             io.tool_output("No RAG objects in this conversation. Nothing to drop.")
-            return format_command_result(io, "rag-drop", "No RAG objects to drop", error=None)
+            return format_command_result(io, "rag-drop", "No RAG objects to drop")
 
         if not args.strip():
             removed = len(files)
@@ -80,7 +84,7 @@ class CustomCommand(BaseCommand):
 
         if not dropped:
             io.tool_output(f"No RAG objects matched: {args.strip()}")
-            return format_command_result(io, "rag-drop", "No matching RAG objects", error=None)
+            return format_command_result(io, "rag-drop", "No matching RAG objects")
 
         _ru = _load_rag_utils()
         build_rag_index = _ru.build_rag_index
@@ -91,6 +95,14 @@ class CustomCommand(BaseCommand):
 
         io.tool_output(f"Dropped {len(dropped)} RAG files: " + ", ".join(sorted(dropped)))
         return format_command_result(io, "rag-drop", f"Dropped {len(dropped)} RAG objects")
+
+    @staticmethod
+    def _resolve(root, pattern):
+        pattern = os.path.expanduser(pattern)
+        p = Path(pattern)
+        if not p.is_absolute():
+            p = Path(root) / p
+        return p
 
     @classmethod
     def get_completions(cls, io, coder, args) -> List[str]:

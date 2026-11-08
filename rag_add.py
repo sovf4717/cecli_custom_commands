@@ -1,7 +1,7 @@
 """Custom command: /rag-add"""
 
-import importlib.util as _ilu
 import os
+import sys
 from pathlib import Path
 from typing import List
 
@@ -15,14 +15,23 @@ from cecli.utils import run_fzf
 
 
 def _load_rag_utils():
-    """Load rag_utils.py from the same directory as this file."""
-    import sys
-    from pathlib import Path as _Path
-    dir_name = _Path(__file__).parent
-    if str(dir_name) not in sys.path:
-        sys.path.insert(0, str(dir_name))
-    import rag_utils as _ru
-    return _ru
+    """Load rag_utils.py from the same directory as this file, with a fallback
+    to the importlib mechanism if the sys.path trick fails."""
+    dir_name = str(Path(__file__).parent)
+    if dir_name not in sys.path:
+        sys.path.insert(0, dir_name)
+    try:
+        import rag_utils as _ru
+        return _ru
+    except ImportError:
+        # Fallback: load via importlib in case the module was already imported
+        # under a different name or the path insertion raced.
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location("_rag_utils", Path(__file__).parent / "rag_utils.py")
+        module = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules["rag_utils"] = module
+        return module
 
 
 def _get_rag_state(coder):
@@ -65,9 +74,14 @@ class CustomCommand(BaseCommand):
                 io, "rag-add", "None of the selected paths exist; nothing to add"
             )
 
-        # Expand directories/globs into concrete files.
+        # Expand directories/globs into concrete files. collect_target_files
+        # understands quoted-path strings (via rag_utils.split_args_with_spaces)
+        # so "C:\\Users\\me\\my folder\\notes.md" is treated as one path even
+        # when the user did not use quotes (they will if they know about it).
         concrete_files = collect_target_files(resolved, root)
         if not concrete_files:
+            io.tool_output(f"No indexable files found. Treated paths: {resolved}")
+            io.tool_output("Hint: if a path contains spaces, quote it: /rag-add \"C:\\...\\folder with space\\notes.md\"")
             return format_command_result(
                 io, "rag-add", "No indexable files found in selection"
             )
@@ -90,6 +104,8 @@ class CustomCommand(BaseCommand):
         io.tool_output(
             f"Added {len(concrete_files)} files ({len(new_index_data['entries'])} chunks) to the RAG store."
         )
+        for f in concrete_files:
+            io.tool_output(f"  {f}")
         io.tool_output(
             "This RAG set is valid for the current conversation only. Use /rag-question to ask questions."
         )
@@ -150,4 +166,6 @@ class CustomCommand(BaseCommand):
         help_text += "\nRAG objects are stored for the current conversation only (like /add files).\n"
         help_text += "They disappear when the cecli session ends.\n"
         help_text += "Use /rag-question to ask questions against the registered RAG objects.\n"
+        help_text += "\nNote: paths with spaces must be quoted:\n"
+        help_text += "  /rag-add \"C:\\Users\\me\\my folder\\notes.md\"\n"
         return help_text

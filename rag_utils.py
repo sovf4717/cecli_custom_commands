@@ -13,7 +13,7 @@ import hashlib
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import List
 
 _SKIP_DIRS = {
     ".git", ".hg", ".svn", "__pycache__", "node_modules",
@@ -30,15 +30,67 @@ _TEXT_EXTS = {
 }
 
 
+def _quote_path_token(p):
+    """Quote a path string for shell-ish argument parsing (keeps spaces intact)."""
+    p = str(p)
+    if " " in p and '"' not in p:
+        return f'"{p}"'
+    return p
+
+
+def split_args_with_spaces(args):
+    """Split command arguments on unquoted whitespace, preserving quoted spans.
+
+    This is a helper so command files can parse things like:
+    /rag-add "C:\\Users\\me\\my folder\\notes.md"  extra.txt
+    without breaking on spaces. The returned tokens keep their surrounding
+    quote characters stripped.
+    """
+    out = []
+    cur: List[str] = []
+    in_q: str = ""
+    for ch in args:
+        if ch in ('"', "'"):
+            if not in_q:
+                in_q = ch
+            elif in_q == ch:
+                in_q = ""
+        elif ch.isspace() and not in_q:
+            if cur:
+                out.append("".join(cur))
+                cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        out.append("".join(cur))
+    return out
+
+
 def collect_target_files(paths, root):
-    """Expand a list of paths (files, dirs, globs) into concrete, indexable files."""
+    """Expand a list of paths (files, dirs, globs) into concrete, indexable files.
+
+    Accepts either:
+    - a flat list of path strings / Path objects
+    - strings where spaces are wrapped in quotes (we split them with
+      split_args_with_spaces before resolving).
+    """
     result = []
     seen = set()
+    root = Path(root)
+    # Accept plain text where quoted paths were embedded; re-split if needed.
+    flat: List[str] = []
     for p in paths:
-        p = Path(p)
+        p_str = str(p)
+        if any(c in p_str for c in ('"', "'")) and any(c in p_str for c in " \t"):
+            flat.extend(split_args_with_spaces(p_str))
+        else:
+            flat.append(p_str)
+
+    for raw in flat:
+        p = Path(os.path.expanduser(raw))
         if any(c in str(p) for c in "*?["):
             if not p.is_absolute():
-                p = Path(root) / p
+                p = root / p
             try:
                 matches = sorted(p.glob("*"))
             except (OSError, ValueError):
@@ -73,10 +125,33 @@ _STOPWORDS = frozenset(
     "a an and are as at be but by for from has have in is it of on or that the this to was were will would i you he she they we me him her them us my your his her their our its so if then than when which who what where why how all any both each few more most other some such only own same too can could should do does did done been being will shall may might must not no nor".split()
 )
 
+_CJK_STOPWORDS = frozenset("的 了 在 是 我 有 和 就 也 都 而 及 以 于 这 那 你 他 她 它 吗 呢 吧 啊 哦 嗯 与 并 或 对 从 向 被 把 给 让 为 所 之 其 此 彼".split())
+
 
 def _tokenize(text: str):
-    tokens = re.findall(r"[a-zA-Z_][a-zA-Z_0-9]*", text.lower())
-    return [t for t in tokens if t not in _STOPWORDS and len(t) > 1]
+    """Extract tokens from mixed CJK + Latin text.
+
+    - Latin: word tokens [a-zA-Z_][a-zA-Z_0-9]* (lowercased, stopwords filtered).
+    - CJK: character + bigram tokens of CJK runs (light segmentation, no
+      external dependencies).
+    """
+    tokens = []
+    latin = re.findall(r"[a-zA-Z_][a-zA-Z_0-9]*", text.lower())
+    for t in latin:
+        if t not in _STOPWORDS and len(t) > 1:
+            tokens.append(t)
+    for run in re.findall(r"[\u4e00-\u9fff]+", text):
+        run = run.strip()
+        if not run:
+            continue
+        for ch in run:
+            if ch not in _CJK_STOPWORDS:
+                tokens.append(ch)
+        for i in range(len(run) - 1):
+            bigram = run[i:i + 2]
+            if bigram not in _CJK_STOPWORDS:
+                tokens.append(bigram)
+    return tokens
 
 
 def build_rag_index(file_paths):
@@ -118,28 +193,36 @@ def _emit(entries, fpath_str, start, text):
 
 
 def rag_context_block(index, question, top_k=8):
-    """Score index entries against question by keyword overlap, return top-k chunks."""
+    """Score index entries against the question; return the top-k chunks as a
+    real, newlined Markdown-ish block the model can read."""
     entries = index.get("entries", [])
     if not entries:
         return ""
     q_tokens = set(_tokenize(question))
-    if not q_tokens:
-        picked = entries[:top_k]
-    else:
-        scored = []
+    scored = []
+    for e in entries:
+        e_tokens = set(_tokenize(e["text"]))
+        overlap = len(q_tokens & e_tokens)
+        if overlap:
+            scored.append((overlap, e))
+    scored.sort(key=lambda x: -x[0])
+    picked = [e for _, e in scored[:top_k]]
+    # Pad with unselected head entries so the model has surrounding context
+    # even when the question barely overlaps the chunks.
+    if len(picked) < top_k:
+        seen_ids = {e["id"] for e in picked}
         for e in entries:
-            e_tokens = set(_tokenize(e["text"]))
-            overlap = len(q_tokens & e_tokens)
-            if overlap:
-                scored.append((overlap, e))
-        scored.sort(key=lambda x: -x[0])
-        picked = [e for _, e in scored[:top_k]]
-        if not picked:
-            picked = entries[:top_k]
+            if e["id"] in seen_ids:
+                continue
+            picked.append(e)
+            seen_ids.add(e["id"])
+            if len(picked) >= top_k:
+                break
     if not picked:
         return ""
     parts = ["# RAG Context (retrieved chunks)"]
     for i, e in enumerate(picked, 1):
-        parts.append(f"\\n## Chunk {i}  --  \\`{e['file']}\\`")
+        parts.append("")
+        parts.append(f"## Chunk {i}  --  `{e['file']}`")
         parts.append(e["text"].strip())
-    return "\\n".join(parts)
+    return "\n".join(parts)
